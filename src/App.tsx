@@ -6,18 +6,14 @@ import './App.css';
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
-interface HighlightedText {
-  text: string;
-  highlights: {
-    phrase: string;
-    reason: string;
-    importance: 'high' | 'medium' | 'low';
-  }[];
+interface FormattedResult {
+  formatted_text: string;
+  rationale: string;
 }
 
 function App() {
   const [inputText, setInputText] = useState('');
-  const [analyzedResult, setAnalyzedResult] = useState<HighlightedText | null>(null);
+  const [analyzedResult, setAnalyzedResult] = useState<FormattedResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,33 +91,22 @@ function App() {
           'X-Title': 'Text Analyzer'
         },
         body: JSON.stringify({
-          model: 'openai/gpt-4o-mini',
+          model: import.meta.env.VITE_OPEN_ROUTER_MODEL,
           messages: [
             {
               role: 'system',
-              content: `You are a text analysis expert. Analyze the provided text and identify key words and phrases that the reader should focus on. For each identified phrase, explain why it's important.
-
-Return your response as a JSON object with this exact structure:
-{
-  "highlights": [
-    {
-      "phrase": "exact phrase from the text",
-      "reason": "brief explanation of why this is important",
-      "importance": "high" | "medium" | "low"
-    }
-  ]
-}
-
-Guidelines:
-- Identify 5-15 key phrases depending on text length
-- Include main concepts, critical terms, action items, and important conclusions
-- The "phrase" must be an EXACT substring from the original text
-- Mark truly critical information as "high", supporting concepts as "medium", and supplementary details as "low"
-- Return ONLY the JSON object, no additional text`
+              content: `You are critical thinking analyst proficient in understanding all types of text. You can adapt your persona and experties per contextual knowledge of a provided text so to answer the user ask as appropriate as possible.`
             },
             {
               role: 'user',
-              content: `Analyze this text and identify key phrases to highlight:\n\n${inputText}`
+              content: `Bold and highlight certain words and phrases that you believe are useful for the reader to retain in memory with your understanding of the domain knowledge and context of the content provided.
+
+In addition to the task above, explain your rationale as to why those words / phrases were bold / highlighted.
+
+To do the above, you must follow the guidelines below:
+- Output the exact text as was inputted and provided to you with proper HTML & CSS tags to represent the bold / highlighting.
+- Do not reproduce differently or summarize the text that was provided.
+- Your response output should be in JSON format of the following: {"formatted_text": <original text with additional tags to represent bold / highlighting>, "rationale": <rationale for the bold / highlighting>}\n\nText to analyze:\n${inputText}`
             }
           ],
           temperature: 0.3
@@ -148,8 +133,8 @@ Guidelines:
 
       const parsed = JSON.parse(jsonMatch[0]);
       setAnalyzedResult({
-        text: inputText,
-        highlights: parsed.highlights || []
+        formatted_text: parsed.formatted_text || inputText,
+        rationale: parsed.rationale || ''
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to analyze text');
@@ -158,74 +143,16 @@ Guidelines:
     }
   };
 
-  const renderHighlightedText = () => {
+  const renderFormattedText = () => {
     if (!analyzedResult) return null;
 
-    const { text, highlights } = analyzedResult;
-
-    // Sort highlights by position in text (first occurrence)
-    const sortedHighlights = [...highlights].sort((a, b) => {
-      const posA = text.toLowerCase().indexOf(a.phrase.toLowerCase());
-      const posB = text.toLowerCase().indexOf(b.phrase.toLowerCase());
-      return posA - posB;
-    });
-
-    // Build segments with highlighting
-    let segments: { text: string; highlight?: typeof highlights[0] }[] = [];
-    let currentIndex = 0;
-    const usedRanges: { start: number; end: number }[] = [];
-
-    for (const highlight of sortedHighlights) {
-      const phraseIndex = text.toLowerCase().indexOf(highlight.phrase.toLowerCase(), currentIndex);
-      if (phraseIndex === -1) continue;
-
-      // Check for overlapping
-      const overlaps = usedRanges.some(
-        range => !(phraseIndex >= range.end || phraseIndex + highlight.phrase.length <= range.start)
-      );
-      if (overlaps) continue;
-
-      // Add text before highlight
-      if (phraseIndex > currentIndex) {
-        segments.push({ text: text.slice(currentIndex, phraseIndex) });
-      }
-
-      // Add highlighted segment
-      segments.push({
-        text: text.slice(phraseIndex, phraseIndex + highlight.phrase.length),
-        highlight
-      });
-
-      usedRanges.push({ start: phraseIndex, end: phraseIndex + highlight.phrase.length });
-      currentIndex = phraseIndex + highlight.phrase.length;
-    }
-
-    // Add remaining text
-    if (currentIndex < text.length) {
-      segments.push({ text: text.slice(currentIndex) });
-    }
+    const { formatted_text } = analyzedResult;
 
     return (
-      <div className="highlighted-text">
-        {segments.map((segment, index) => {
-          if (segment.highlight) {
-            const colorClass =
-              segment.highlight.importance === 'high' ? 'highlight-high' :
-              segment.highlight.importance === 'medium' ? 'highlight-medium' : 'highlight-low';
-
-            return (
-              <span
-                key={index}
-                className={`highlight ${colorClass}`}
-                title={segment.highlight.reason}
-              >
-                {segment.text}
-              </span>
-            );
-          }
-          return <span key={index}>{segment.text}</span>;
-        })}
-      </div>
+      <div 
+        className="formatted-text"
+        dangerouslySetInnerHTML={{ __html: formatted_text }}
+      />
     );
   };
 
@@ -316,33 +243,25 @@ Guidelines:
           <div className="results-section">
             <h2>Analysis Results</h2>
 
-            <div className="legend">
-              <span className="legend-item">
-                <span className="legend-dot high"></span>
-                High Importance
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot medium"></span>
-                Medium Importance
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot low"></span>
-                Low Importance
-              </span>
+            <div className="result-header">
+              <span className="result-label">Formatted Text</span>
+              <div className="tooltip-container">
+                <button className="info-icon" title="View rationale">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 16v-4"/>
+                    <path d="M12 8h.01"/>
+                  </svg>
+                </button>
+                <div className="tooltip-content">
+                  <div className="tooltip-title">Rationale</div>
+                  <div className="tooltip-text">{analyzedResult.rationale}</div>
+                </div>
+              </div>
             </div>
 
             <div className="result-content">
-              {renderHighlightedText()}
-            </div>
-
-            <div className="highlights-list">
-              <h3>Key Phrases Identified</h3>
-              {analyzedResult.highlights.map((item, index) => (
-                <div key={index} className={`highlight-item ${item.importance}`}>
-                  <div className="highlight-phrase">"{item.phrase}"</div>
-                  <div className="highlight-reason">{item.reason}</div>
-                </div>
-              ))}
+              {renderFormattedText()}
             </div>
           </div>
         )}
