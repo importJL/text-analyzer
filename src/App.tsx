@@ -18,6 +18,7 @@ function App() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [maxPhrases, setMaxPhrases] = useState<number>(5);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const extractTextFromPDF = async (file: File): Promise<string> => {
@@ -99,14 +100,26 @@ function App() {
             },
             {
               role: 'user',
-              content: `Bold and highlight certain words and phrases that you believe are useful for the reader to retain in memory with your understanding of the domain knowledge and context of the content provided.
+              content: `Select a maximum of ${maxPhrases} important phrases/words to highlight that you believe are useful for the reader to retain in memory with your understanding of the domain knowledge and context of the content provided.
 
-In addition to the task above, explain your rationale as to why those words / phrases were bold / highlighted.
+Assign an importance level (1, 2, or 3) to each highlighted phrase:
+- Level 1 (Light Yellow #FFF9C4): Basic important terms the reader should recognize
+- Level 2 (Medium Yellow #FFEB3B): Important concepts worth memorizing  
+- Level 3 (Dark Yellow #FBC02D): Most critical concepts essential to remember
+
+In addition to the task above, explain your rationale as to why those words / phrases were highlighted.
 
 To do the above, you must follow the guidelines below:
-- Output the exact text as was inputted and provided to you with proper HTML & CSS tags to represent the bold / highlighting.
+- Output the exact text as was inputted and provided to you with proper HTML & CSS tags to represent the highlighting with different importance levels.
 - Do not reproduce differently or summarize the text that was provided.
-- Your response output should be in JSON format of the following: {"formatted_text": <original text with additional tags to represent bold / highlighting>, "rationale": <rationale for the bold / highlighting>}\n\nText to analyze:\n${inputText}`
+- Use inline styles for each importance level:
+  - Level 1: <span style="background-color: #FFF9C4; font-weight: bold;">phrase</span>
+  - Level 2: <span style="background-color: #FFEB3B; font-weight: bold;">phrase</span>
+  - Level 3: <span style="background-color: #FBC02D; font-weight: bold;">phrase</span>
+- Your response output should be in JSON format of the following: {"formatted_text": <original text with additional tags to represent highlighting>, "rationale": <rationale for the highlighting>}
+
+Text to analyze:
+${inputText}`
             }
           ],
           temperature: 0.3
@@ -161,10 +174,15 @@ To do the above, you must follow the guidelines below:
     setAnalyzedResult(null);
     setError(null);
     setFileName(null);
+    setIsLoading(false);
+    setIsExtracting(false);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
+
+  // Check if there are highlighted results (contains span tags)
+  const hasHighlights = analyzedResult?.formatted_text?.includes('<span');
 
   return (
     <div className="app">
@@ -211,6 +229,19 @@ To do the above, you must follow the guidelines below:
           />
 
           <div className="button-group">
+            <div className="max-phrases-selector">
+              <label htmlFor="max-phrases">Max Phrases:</label>
+              <select
+                id="max-phrases"
+                value={maxPhrases}
+                onChange={(e) => setMaxPhrases(Number(e.target.value))}
+                className="max-phrases-select"
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => (
+                  <option key={num} value={num}>{num}</option>
+                ))}
+              </select>
+            </div>
             <button
               className="analyze-btn"
               onClick={analyzeText}
@@ -232,7 +263,12 @@ To do the above, you must follow the guidelines below:
               )}
             </button>
             <button className="clear-btn" onClick={clearAll}>
-              Clear
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18"/>
+                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+              </svg>
+              Clear All
             </button>
           </div>
 
@@ -242,6 +278,27 @@ To do the above, you must follow the guidelines below:
         {analyzedResult && (
           <div className="results-section">
             <h2>Analysis Results</h2>
+
+            {/* Importance Level Legend */}
+            {hasHighlights && (
+              <div className="importance-legend">
+                <span className="legend-title">Importance Levels:</span>
+                <div className="legend-items">
+                  <span className="legend-item">
+                    <span className="legend-dot level-1"></span>
+                    <span>Level 1 - Recognize</span>
+                  </span>
+                  <span className="legend-item">
+                    <span className="legend-dot level-2"></span>
+                    <span>Level 2 - Memorize</span>
+                  </span>
+                  <span className="legend-item">
+                    <span className="legend-dot level-3"></span>
+                    <span>Level 3 - Essential</span>
+                  </span>
+                </div>
+              </div>
+            )}
 
             <div className="result-header">
               <span className="result-label">Formatted Text</span>
