@@ -9,6 +9,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.j
 interface FormattedResult {
   formatted_text: string;
   rationale: string;
+  summary: string;
 }
 
 function App() {
@@ -19,6 +20,10 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [maxPhrases, setMaxPhrases] = useState<number>(5);
+  const [activeTab, setActiveTab] = useState<'highlights' | 'summary'>('highlights');
+  const [url, setUrl] = useState('');
+  const [isExtractingUrl, setIsExtractingUrl] = useState(false);
+  const [proxyStatus, setProxyStatus] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const extractTextFromPDF = async (file: File): Promise<string> => {
@@ -42,6 +47,171 @@ function App() {
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
     return result.value.trim();
+  };
+
+  // HTTP headers to mimic a real browser - helps bypass anti-bot systems
+  const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://www.bbc.com/',
+    'Accept': 'text/html,application/xhtml+xml',
+    'Accept-Language': 'en-US,en;q=0.9'
+  };
+
+  // List of extraction methods to try in order
+  // Jina AI is tried first as it works best for news sites like BBC
+  const EXTRACTION_METHODS = [
+    { 
+      name: 'Jina AI Reader', 
+      url: (url: string) => `https://r.jina.ai/http://${url.replace(/^https?:\/\//, '')}`,
+      isJina: true 
+    },
+    { 
+      name: 'Jina AI HTTPS', 
+      url: (url: string) => `https://r.jina.ai/https://${url.replace(/^https?:\/\//, '')}`,
+      isJina: true 
+    },
+    { name: 'CodeTabs Proxy', url: (url: string) => `https://api.codetabs.com/v1/proxy?quest=${url}`, hasHeaders: true },
+    { name: 'corsproxy.io', url: (url: string) => `https://corsproxy.io/?${url}`, hasHeaders: true },
+    { name: 'allorigins.win', url: (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, hasHeaders: true },
+    { name: 'corsproxy.org', url: (url: string) => `https://corsproxy.org/?${url}`, hasHeaders: true }
+  ];
+
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  
+  // Get random delay between min and max milliseconds
+  const getRandomDelay = (min: number = 500, max: number = 1500) => {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  };
+
+  const extractTextFromURL = async (url: string, onMethodAttempt?: (methodName: string) => void): Promise<string> => {
+    // Validate URL
+    try {
+      new URL(url);
+    } catch {
+      throw new Error('Please enter a valid URL');
+    }
+
+    let lastError: Error | null = null;
+
+    // Try each extraction method in order
+    for (let attempt = 0; attempt < EXTRACTION_METHODS.length; attempt++) {
+      const method = EXTRACTION_METHODS[attempt];
+      
+      // Notify UI of extraction attempt
+      if (onMethodAttempt) {
+        onMethodAttempt(method.name);
+      }
+
+      // Add small random delay between attempts (except for first)
+      if (attempt > 0) {
+        await delay(getRandomDelay());
+      }
+
+      try {
+        let html: string;
+        const targetUrl = method.url(url);
+
+        // Build fetch options with appropriate headers
+        const fetchOptions: RequestInit = {};
+        
+        if (method.hasHeaders) {
+          fetchOptions.headers = BROWSER_HEADERS;
+        }
+
+        const response = await fetch(targetUrl, fetchOptions);
+        
+        if (!response.ok) {
+          throw new Error(`Method ${method.name} returned: ${response.status} ${response.statusText}`);
+        }
+
+        if (method.isJina) {
+          // Jina AI returns plain text, not HTML
+          html = await response.text();
+          // Wrap in simple HTML for consistent parsing
+          html = `<html><body><pre>${html}</pre></body></html>`;
+        } else if (method.name === 'allorigins.win') {
+          // allorigins.win returns JSON with the content in a "contents" field
+          const data = await response.json();
+          if (!data.contents) {
+            throw new Error(`Method ${method.name} did not return valid content`);
+          }
+          html = data.contents;
+        } else {
+          html = await response.text();
+        }
+
+        // Parse HTML and extract text content
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+
+        // Remove script, style, and other non-content elements
+        const scripts = doc.querySelectorAll('script, style, noscript, iframe, object, embed');
+        scripts.forEach(el => el.remove());
+
+        // Get text content from body
+        const body = doc.body;
+        if (!body) {
+          throw new Error('Could not parse HTML content');
+        }
+
+        // Extract text and clean up whitespace
+        let text = body.textContent || '';
+        text = text.replace(/\s+/g, ' ').trim();
+
+        if (!text) {
+          throw new Error('No text content found on the page');
+        }
+
+        // Success! Return the extracted text
+        return text;
+
+      } catch (error) {
+        // Store this error and try the next method
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.warn(`Method ${method.name} failed:`, lastError.message);
+        
+        // If this is a network error or 403/500, continue to next method
+        // If it's a content parsing error, we might still want to try other methods
+        continue;
+      }
+    }
+
+    // All methods failed
+    const attemptedMethods = EXTRACTION_METHODS.map(m => m.name).join(', ');
+    throw new Error(
+      `Unable to extract text from this URL. The website may be blocking automated access.\n\n` +
+      `Attempted methods: ${attemptedMethods}\n\n` +
+      `Suggestions:\n` +
+      `• Try copy-pasting the text directly\n` +
+      `• Try a different source URL\n` +
+      `• Some websites (like CNBC, paywalled content) actively block extraction\n` +
+      `• Last error: ${lastError?.message || 'Unknown error'}`
+    );
+  };
+
+  const handleUrlExtract = async () => {
+    if (!url.trim()) {
+      setError('Please enter a URL');
+      return;
+    }
+
+    setIsExtractingUrl(true);
+    setError(null);
+    setAnalyzedResult(null);
+    setProxyStatus(null);
+
+    try {
+      const extractedText = await extractTextFromURL(url, (methodName) => {
+        setProxyStatus(`Trying ${methodName}...`);
+      });
+      setInputText(extractedText);
+      setProxyStatus('Extraction successful!');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to extract text from URL');
+      setProxyStatus(null);
+    } finally {
+      setIsExtractingUrl(false);
+    }
   };
 
   const handleFileUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -109,6 +279,8 @@ Assign an importance level (1, 2, or 3) to each highlighted phrase:
 
 In addition to the task above, explain your rationale as to why those words / phrases were highlighted.
 
+Also provide a concise summary of the key points from the text.
+
 To do the above, you must follow the guidelines below:
 - Output the exact text as was inputted and provided to you with proper HTML & CSS tags to represent the highlighting with different importance levels.
 - Do not reproduce differently or summarize the text that was provided.
@@ -116,7 +288,7 @@ To do the above, you must follow the guidelines below:
   - Level 1: <span style="background-color: #FFF9C4; font-weight: bold;">phrase</span>
   - Level 2: <span style="background-color: #FFEB3B; font-weight: bold;">phrase</span>
   - Level 3: <span style="background-color: #FBC02D; font-weight: bold;">phrase</span>
-- Your response output should be in JSON format of the following: {"formatted_text": <original text with additional tags to represent highlighting>, "rationale": <rationale for the highlighting>}
+- Your response output should be in JSON format of the following: {"formatted_text": <original text with additional tags to represent highlighting>, "rationale": <rationale for the highlighting>, "summary": <concise summary of the key points from the text>}
 
 Text to analyze:
 ${inputText}`
@@ -147,7 +319,8 @@ ${inputText}`
       const parsed = JSON.parse(jsonMatch[0]);
       setAnalyzedResult({
         formatted_text: parsed.formatted_text || inputText,
-        rationale: parsed.rationale || ''
+        rationale: parsed.rationale || '',
+        summary: parsed.summary || ''
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to analyze text');
@@ -176,6 +349,10 @@ ${inputText}`
     setFileName(null);
     setIsLoading(false);
     setIsExtracting(false);
+    setUrl('');
+    setIsExtractingUrl(false);
+    setProxyStatus(null);
+    setActiveTab('highlights');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -211,6 +388,49 @@ ${inputText}`
               <span>{isExtracting ? 'Extracting...' : 'Upload PDF or DOCX'}</span>
             </label>
             {fileName && <span className="file-name">{fileName}</span>}
+
+            <div className="url-input-container">
+              <span className="url-label">Or enter URL:</span>
+              <input
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://example.com"
+                className="url-input"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleUrlExtract();
+                  }
+                }}
+              />
+              <button
+                className="extract-btn"
+                onClick={handleUrlExtract}
+                disabled={isExtractingUrl || !url.trim()}
+              >
+                {isExtractingUrl ? (
+                  <>
+                    <span className="spinner"></span>
+                    Extracting...
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10"/>
+                      <line x1="2" y1="12" x2="22" y2="12"/>
+                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                    </svg>
+                    Extract
+                  </>
+                )}
+              </button>
+            </div>
+            {proxyStatus && (
+              <div className="proxy-status">
+                <span className="proxy-spinner"></span>
+                {proxyStatus}
+              </div>
+            )}
           </div>
 
           <div className="divider">
@@ -279,46 +499,92 @@ ${inputText}`
           <div className="results-section">
             <h2>Analysis Results</h2>
 
-            {/* Importance Level Legend */}
-            {hasHighlights && (
-              <div className="importance-legend">
-                <span className="legend-title">Importance Levels:</span>
-                <div className="legend-items">
-                  <span className="legend-item">
-                    <span className="legend-dot level-1"></span>
-                    <span>Level 1 - Recognize</span>
-                  </span>
-                  <span className="legend-item">
-                    <span className="legend-dot level-2"></span>
-                    <span>Level 2 - Memorize</span>
-                  </span>
-                  <span className="legend-item">
-                    <span className="legend-dot level-3"></span>
-                    <span>Level 3 - Essential</span>
-                  </span>
-                </div>
-              </div>
-            )}
-
-            <div className="result-header">
-              <span className="result-label">Formatted Text</span>
-              <div className="tooltip-container">
-                <button className="info-icon" title="View rationale">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/>
-                    <path d="M12 16v-4"/>
-                    <path d="M12 8h.01"/>
-                  </svg>
-                </button>
-                <div className="tooltip-content">
-                  <div className="tooltip-title">Rationale</div>
-                  <div className="tooltip-text">{analyzedResult.rationale}</div>
-                </div>
-              </div>
+            {/* Tab Navigation */}
+            <div className="tab-nav">
+              <button
+                className={`tab-button ${activeTab === 'highlights' ? 'active' : ''}`}
+                onClick={() => setActiveTab('highlights')}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                  <path d="M2 17l10 5 10-5"/>
+                  <path d="M2 12l10 5 10-5"/>
+                </svg>
+                Highlights
+              </button>
+              <button
+                className={`tab-button ${activeTab === 'summary' ? 'active' : ''}`}
+                onClick={() => setActiveTab('summary')}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="16" y1="13" x2="8" y2="13"/>
+                  <line x1="16" y1="17" x2="8" y2="17"/>
+                  <line x1="10" y1="9" x2="8" y2="9"/>
+                </svg>
+                Summary
+              </button>
             </div>
 
-            <div className="result-content">
-              {renderFormattedText()}
+            {/* Tab Content */}
+            <div className="tab-content">
+              {activeTab === 'highlights' && (
+                <>
+                  {/* Importance Level Legend */}
+                  {hasHighlights && (
+                    <div className="importance-legend">
+                      <span className="legend-title">Importance Levels:</span>
+                      <div className="legend-items">
+                        <span className="legend-item">
+                          <span className="legend-dot level-1"></span>
+                          <span>Level 1 - Recognize</span>
+                        </span>
+                        <span className="legend-item">
+                          <span className="legend-dot level-2"></span>
+                          <span>Level 2 - Memorize</span>
+                        </span>
+                        <span className="legend-item">
+                          <span className="legend-dot level-3"></span>
+                          <span>Level 3 - Essential</span>
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="result-header">
+                    <span className="result-label">Formatted Text</span>
+                    <div className="tooltip-container">
+                      <button className="info-icon" title="View rationale">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10"/>
+                          <path d="M12 16v-4"/>
+                          <path d="M12 8h.01"/>
+                        </svg>
+                      </button>
+                      <div className="tooltip-content">
+                        <div className="tooltip-title">Rationale</div>
+                        <div className="tooltip-text">{analyzedResult.rationale}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="result-content">
+                    {renderFormattedText()}
+                  </div>
+                </>
+              )}
+
+              {activeTab === 'summary' && analyzedResult.summary && (
+                <div className="summary-container">
+                  <div className="summary-header">
+                    <span className="result-label">Summary</span>
+                  </div>
+                  <div className="summary-content">
+                    {analyzedResult.summary}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
